@@ -1,0 +1,21 @@
+# Backend
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/.env
+backend/server.log
+backend/server.pid
+
+# Android
+android/.gradle/
+android/app/build/
+android/*.iml
+android/local.properties
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store

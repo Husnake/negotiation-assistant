@@ -1,7 +1,0 @@
-INFO:     Started server process [1818033]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-启动谈判助理后端...
-请确保环境变量 OPENAI_API_KEY 已设置
-INFO:     127.0.0.1:58444 - "GET /health HTTP/1.1" 404 Not Found
