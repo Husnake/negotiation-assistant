@@ -30,8 +30,12 @@ jobs:
       - name: Accept Android licenses
         run: yes | sdkmanager --licenses
 
+      - name: Generate Gradle Wrapper
+        run: gradle wrapper --gradle-version 8.5
+        working-directory: ./android
+
       - name: Build APK
-        run: gradle assembleDebug
+        run: ./gradlew assembleDebug
         working-directory: ./android
 
       - name: Upload APK

@@ -54,4 +54,7 @@ dependencies {
 
     // JSON
     implementation("org.json:json:20231013")
+
+    // Material Icons
+    implementation("androidx.compose.material:material-icons-extended")
 }
