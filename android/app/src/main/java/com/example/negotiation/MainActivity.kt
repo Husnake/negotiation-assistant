@@ -89,7 +89,7 @@ class MainActivity : ComponentActivity() {
             connectionStatus.value = "请输入IP地址"
             return
         }
-        val url = if (ip.startsWith("ws://")) ip else "ws://$ip:8000/ws"
+        val url = if (ip.startsWith("ws://") || ip.startsWith("wss://")) ip else "ws://$ip:8000/ws"
         wsManager.connect(url)
     }
 
