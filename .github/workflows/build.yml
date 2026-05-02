@@ -35,7 +35,9 @@ jobs:
         working-directory: ./android
 
       - name: Build APK
-        run: ./gradlew assembleDebug 2>&1 | tee build-log.txt
+        run: |
+          ./gradlew assembleDebug 2>&1 | tee build-log.txt
+          exit ${PIPESTATUS[0]}
         working-directory: ./android
 
       - name: Upload build log
