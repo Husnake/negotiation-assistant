@@ -61,6 +61,13 @@ class WebSocketManager(
         webSocket?.send(buffer.readByteString())
     }
 
+    fun sendText(text: String) {
+        val json = org.json.JSONObject().apply {
+            put("text", text)
+        }
+        webSocket?.send(json.toString())
+    }
+
     fun disconnect() {
         webSocket?.close(1000, "用户断开")
         webSocket = null

@@ -1,7 +1,4 @@
 import os
-import asyncio
-import tempfile
-import wave
 import json
 from datetime import datetime
 from fastapi import FastAPI, WebSocket
@@ -20,7 +17,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# LLM 客户端（兼容 OpenAI 格式，支持 DeepSeek / 火山引擎 / OpenAI 等）
+client = openai.AsyncOpenAI(
+    api_key=os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+)
+
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
+LLM_SUMMARY_MODEL = os.getenv("LLM_SUMMARY_MODEL", "gpt-4o-mini")
 
 
 class NegotiationSession:
@@ -41,13 +45,13 @@ TRIGGER_WORDS = [
 
 
 async def analyze_dialogue(session: NegotiationSession):
-    """调用 GPT-4o 分析谈判对话"""
+    """调用 LLM 分析谈判对话"""
     recent = "\n".join([
         f"{'买方' if i % 2 == 0 else '卖方/中介'}: {t}"
         for i, t in enumerate(session.transcript[-18:])
     ])
 
-    prompt = f"""你是一位有20年经验的房产谈判专家。请分析以下二手房谈判对话，给出简短、可执行的建议。
+    prompt = f"""你是一位有20年经验的房产谈判专家。请分析以下二手房谈判对话，给出短俊、可执行的建议。
 
 当前谈判摘要：{session.context_summary or '刚开始谈判'}
 最近对话记录：
@@ -64,7 +68,7 @@ async def analyze_dialogue(session: NegotiationSession):
 
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o",
+            model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.6,
@@ -89,7 +93,7 @@ async def update_summary(session: NegotiationSession):
 {full}"""
     try:
         resp = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=LLM_SUMMARY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=100
         )
@@ -109,68 +113,37 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            # 接收二进制音频数据
-            audio_bytes = await websocket.receive_bytes()
+            # 接收 JSON 文本消息（App 实时语音识别后发送的文字）
+            data = await websocket.receive_json()
+            text = data.get("text", "").strip()
 
-            if len(audio_bytes) < 1000:
-                continue  # 忽略过小片段
+            if not text:
+                continue
 
-            # 保存为 wav
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                with wave.open(tmp.name, 'wb') as wav:
-                    wav.setnchannels(1)
-                    wav.setsampwidth(2)
-                    wav.setframerate(16000)
-                    wav.writeframes(audio_bytes)
-                tmp_path = tmp.name
+            print(f"[收到] {text}")
+            session.transcript.append(text)
 
-            # Whisper 转写
-            try:
-                with open(tmp_path, 'rb') as audio_file:
-                    transcript = await client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=audio_file,
-                        language="zh"
-                    )
+            # 发送转写结果给客户端
+            await websocket.send_json({
+                "type": "transcript",
+                "text": text,
+                "timestamp": datetime.now().isoformat()
+            })
 
-                text = transcript.text.strip()
-                if not text:
-                    continue
+            # 触发分析：每3句，或包含关键词
+            should_analyze = (
+                len(session.transcript) % 3 == 0 or
+                any(w in text for w in TRIGGER_WORDS)
+            ) and len(session.transcript) >= 2
 
-                session.transcript.append(text)
-                print(f"[转写] {text}")
-
-                # 发送转写结果给客户端
+            if should_analyze:
+                advice_json = await analyze_dialogue(session)
+                print(f"[建议] {advice_json[:100]}...")
                 await websocket.send_json({
-                    "type": "transcript",
-                    "text": text,
+                    "type": "advice",
+                    "content": advice_json,
                     "timestamp": datetime.now().isoformat()
                 })
-
-                # 触发分析：每3句，或包含关键词
-                should_analyze = (
-                    len(session.transcript) % 3 == 0 or
-                    any(w in text for w in TRIGGER_WORDS)
-                ) and len(session.transcript) >= 2
-
-                if should_analyze:
-                    advice_json = await analyze_dialogue(session)
-                    print(f"[建议] {advice_json[:100]}...")
-                    await websocket.send_json({
-                        "type": "advice",
-                        "content": advice_json,
-                        "timestamp": datetime.now().isoformat()
-                    })
-
-            except Exception as e:
-                print(f"处理错误: {e}")
-                await websocket.send_json({
-                    "type": "error",
-                    "message": str(e)
-                })
-            finally:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
 
     except Exception as e:
         print(f"连接断开: {e}")
@@ -182,5 +155,6 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     print("启动谈判助理后端...")
-    print("请确保环境变量 OPENAI_API_KEY 已设置")
+    print(f"LLM 模型: {LLM_MODEL}")
+    print(f"LLM 地址: {client.base_url}")
     uvicorn.run(app, host="0.0.0.0", port=8000)

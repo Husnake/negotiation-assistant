@@ -1,7 +1,11 @@
 package com.example.negotiation
 
 import android.Manifest
+import android.content.Intent
 import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,14 +22,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.negotiation.service.AudioRecorder
 import com.example.negotiation.service.WebSocketManager
 import com.example.negotiation.ui.theme.NegotiationTheme
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
-    private lateinit var audioRecorder: AudioRecorder
+    private lateinit var speechRecognizer: SpeechRecognizer
     private lateinit var wsManager: WebSocketManager
 
     private val transcripts = mutableStateListOf<String>()
@@ -33,12 +36,13 @@ class MainActivity : ComponentActivity() {
     private val isRecording = mutableStateOf(false)
     private val connectionStatus = mutableStateOf("未连接")
     private val serverIp = mutableStateOf("")
+    private val isRecognizing = mutableStateOf(false)
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            startRecording()
+            startRealtimeRecognition()
         } else {
             connectionStatus.value = "需要录音权限"
         }
@@ -47,9 +51,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        audioRecorder = AudioRecorder { audioData ->
-            wsManager.sendAudio(audioData)
-        }
+        initSpeechRecognizer()
 
         wsManager = WebSocketManager(
             onTranscript = { text ->
@@ -75,12 +77,66 @@ class MainActivity : ComponentActivity() {
                         transcripts = transcripts,
                         advice = adviceData.value,
                         isRecording = isRecording.value,
+                        isRecognizing = isRecognizing.value,
                         connectionStatus = connectionStatus.value,
                         onConnect = { connectToServer(serverIp.value) },
                         onToggleRecord = { toggleRecording() }
                     )
                 }
             }
+        }
+    }
+
+    private fun initSpeechRecognizer() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            connectionStatus.value = "设备不支持语音识别，请安装 Google 语音搜索"
+            return
+        }
+
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+            setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    isRecognizing.value = true
+                }
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() {
+                    isRecognizing.value = false
+                }
+                override fun onError(error: Int) {
+                    isRecognizing.value = false
+                    val msg = when (error) {
+                        SpeechRecognizer.ERROR_NO_MATCH -> "没识别到语音，请再说一遍"
+                        SpeechRecognizer.ERROR_NETWORK -> "网络错误"
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "权限不足"
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "说话超时"
+                        else -> "识别错误: $error"
+                    }
+                    if (error != SpeechRecognizer.ERROR_CLIENT) {
+                        connectionStatus.value = msg
+                    }
+                    // 如果还在录音状态，自动重启识别
+                    if (isRecording.value) {
+                        restartRecognition()
+                    }
+                }
+                override fun onResults(results: Bundle?) {
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val text = matches?.get(0) ?: ""
+                    if (text.isNotBlank()) {
+                        wsManager.sendText(text)
+                    }
+                    // 连续识别：如果还在录音状态，重新启动
+                    if (isRecording.value) {
+                        restartRecognition()
+                    }
+                }
+                override fun onPartialResults(partialResults: Bundle?) {
+                    // 可选：实时显示部分结果
+                }
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
         }
     }
 
@@ -95,29 +151,55 @@ class MainActivity : ComponentActivity() {
 
     private fun toggleRecording() {
         if (isRecording.value) {
-            stopRecording()
+            stopRealtimeRecognition()
         } else {
+            if (connectionStatus.value != "已连接") {
+                connectionStatus.value = "请先连接后端"
+                return
+            }
             requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
 
-    private fun startRecording() {
-        if (connectionStatus.value != "已连接") {
-            connectionStatus.value = "请先连接后端"
+    private fun startRealtimeRecognition() {
+        if (!::speechRecognizer.isInitialized) {
+            connectionStatus.value = "语音识别未初始化"
             return
         }
-        audioRecorder.start()
         isRecording.value = true
+        startListening()
     }
 
-    private fun stopRecording() {
-        audioRecorder.stop()
+    private fun startListening() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+        speechRecognizer.startListening(intent)
+    }
+
+    private fun restartRecognition() {
+        if (!isRecording.value) return
+        speechRecognizer.stopListening()
+        startListening()
+    }
+
+    private fun stopRealtimeRecognition() {
         isRecording.value = false
+        isRecognizing.value = false
+        if (::speechRecognizer.isInitialized) {
+            speechRecognizer.stopListening()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        audioRecorder.stop()
+        stopRealtimeRecognition()
+        if (::speechRecognizer.isInitialized) {
+            speechRecognizer.destroy()
+        }
         wsManager.disconnect()
     }
 
@@ -148,6 +230,7 @@ fun MainScreen(
     transcripts: List<String>,
     advice: AdviceData?,
     isRecording: Boolean,
+    isRecognizing: Boolean,
     connectionStatus: String,
     onConnect: () -> Unit,
     onToggleRecord: () -> Unit
@@ -168,7 +251,6 @@ fun MainScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // 标题
         Text(
             text = "谈判助理",
             fontSize = 26.sp,
@@ -176,7 +258,6 @@ fun MainScreen(
             modifier = Modifier.padding(bottom = 12.dp)
         )
 
-        // 服务器配置
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -184,7 +265,7 @@ fun MainScreen(
             OutlinedTextField(
                 value = serverIp,
                 onValueChange = onServerIpChange,
-                label = { Text("后端IP (如: 192.168.1.5)") },
+                label = { Text("后端地址 (如: wss://xxx.trycloudflare.com/ws)") },
                 modifier = Modifier.weight(1f),
                 singleLine = true
             )
@@ -194,9 +275,8 @@ fun MainScreen(
             }
         }
 
-        // 状态
         Text(
-            text = "状态: $connectionStatus",
+            text = "状态: $connectionStatus${if (isRecognizing) " (识别中...)" else ""}",
             fontSize = 13.sp,
             color = when (connectionStatus) {
                 "已连接" -> Color(0xFF4CAF50)
@@ -206,7 +286,6 @@ fun MainScreen(
             modifier = Modifier.padding(vertical = 4.dp)
         )
 
-        // 建议卡片（核心！）
         advice?.let {
             Card(
                 modifier = Modifier
@@ -246,7 +325,6 @@ fun MainScreen(
             }
         }
 
-        // 转写记录
         Text(
             text = "实时转写 (${transcripts.size} 条)",
             fontSize = 14.sp,
@@ -276,7 +354,6 @@ fun MainScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 录音按钮
         Button(
             onClick = onToggleRecord,
             modifier = Modifier
@@ -287,7 +364,7 @@ fun MainScreen(
             )
         ) {
             Text(
-                text = if (isRecording) "⏹️ 停止录音" else "🎤 开始实时分析",
+                text = if (isRecording) "⏹️ 停止实时分析" else "🎤 开始实时分析",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold
             )
