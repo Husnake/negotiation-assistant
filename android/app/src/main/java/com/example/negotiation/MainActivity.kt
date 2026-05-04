@@ -127,6 +127,16 @@ class MainActivity : ComponentActivity() {
 
     private fun startListening(recognizer: SpeechRecognizer) {
         isRecognizing.value = true
+
+        // 设置讯飞识别参数
+        recognizer.setParameter(SpeechConstant.DOMAIN, "iat")
+        recognizer.setParameter(SpeechConstant.LANGUAGE, "zh_cn")
+        recognizer.setParameter(SpeechConstant.ACCENT, "mandarin")
+        recognizer.setParameter(SpeechConstant.RESULT_TYPE, "json")
+        recognizer.setParameter(SpeechConstant.ASR_PTT, "1")
+        recognizer.setParameter(SpeechConstant.VAD_BOS, "4000")
+        recognizer.setParameter(SpeechConstant.VAD_EOS, "1000")
+
         val ret = recognizer.startListening(object : RecognizerListener {
             override fun onVolumeChanged(volume: Int, data: ByteArray?) {}
             override fun onBeginOfSpeech() {}
