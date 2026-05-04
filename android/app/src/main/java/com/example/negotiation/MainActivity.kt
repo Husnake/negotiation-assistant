@@ -1,11 +1,7 @@
 package com.example.negotiation
 
 import android.Manifest
-import android.content.Intent
 import android.os.Bundle
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,11 +20,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.negotiation.service.WebSocketManager
 import com.example.negotiation.ui.theme.NegotiationTheme
+import com.example.negotiation.util.XfyunJsonParser
+import com.iflytek.cloud.*
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
-    private lateinit var speechRecognizer: SpeechRecognizer
+    private var xfyunRecognizer: SpeechRecognizer? = null
     private lateinit var wsManager: WebSocketManager
 
     private val transcripts = mutableStateListOf<String>()
@@ -51,7 +49,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        initSpeechRecognizer()
+        // 讯飞 SDK 初始化
+        SpeechUtility.createUtility(this, SpeechConstant.APPID + "=a0d2a24e")
+        initXfyunRecognizer()
 
         wsManager = WebSocketManager(
             onTranscript = { text ->
@@ -87,56 +87,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun initSpeechRecognizer() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            connectionStatus.value = "设备不支持语音识别，请安装 Google 语音搜索"
-            return
-        }
-
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
-            setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    isRecognizing.value = true
-                }
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {
-                    isRecognizing.value = false
-                }
-                override fun onError(error: Int) {
-                    isRecognizing.value = false
-                    val msg = when (error) {
-                        SpeechRecognizer.ERROR_NO_MATCH -> "没识别到语音，请再说一遍"
-                        SpeechRecognizer.ERROR_NETWORK -> "网络错误"
-                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "权限不足"
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "说话超时"
-                        else -> "识别错误: $error"
-                    }
-                    if (error != SpeechRecognizer.ERROR_CLIENT) {
-                        connectionStatus.value = msg
-                    }
-                    // 如果还在录音状态，自动重启识别
-                    if (isRecording.value) {
-                        restartRecognition()
-                    }
-                }
-                override fun onResults(results: Bundle?) {
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val text = matches?.get(0) ?: ""
-                    if (text.isNotBlank()) {
-                        wsManager.sendText(text)
-                    }
-                    // 连续识别：如果还在录音状态，重新启动
-                    if (isRecording.value) {
-                        restartRecognition()
-                    }
-                }
-                override fun onPartialResults(partialResults: Bundle?) {
-                    // 可选：实时显示部分结果
-                }
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
+    private fun initXfyunRecognizer() {
+        xfyunRecognizer = SpeechRecognizer.createRecognizer(this) { code ->
+            if (code != ErrorCode.SUCCESS) {
+                connectionStatus.value = "讯飞语音初始化失败: $code"
+            }
         }
     }
 
@@ -162,44 +117,60 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startRealtimeRecognition() {
-        if (!::speechRecognizer.isInitialized) {
+        val recognizer = xfyunRecognizer ?: run {
             connectionStatus.value = "语音识别未初始化"
             return
         }
         isRecording.value = true
-        startListening()
+        startListening(recognizer)
     }
 
-    private fun startListening() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+    private fun startListening(recognizer: SpeechRecognizer) {
+        isRecognizing.value = true
+        val ret = recognizer.startListening(object : RecognizerListener {
+            override fun onVolumeChanged(volume: Int, data: ByteArray?) {}
+            override fun onBeginOfSpeech() {}
+            override fun onEndOfSpeech() {
+                isRecognizing.value = false
+            }
+            override fun onResult(results: RecognizerResult?, isLast: Boolean) {
+                val json = results?.resultString ?: ""
+                val text = XfyunJsonParser.parseResult(json)
+                if (text.isNotBlank()) {
+                    transcripts.add(text)
+                    wsManager.sendText(text)
+                }
+                // 连续识别：如果还在录音状态，重新启动
+                if (isRecording.value && isLast) {
+                    startListening(recognizer)
+                }
+            }
+            override fun onError(error: SpeechError?) {
+                isRecognizing.value = false
+                val msg = error?.errorDescription ?: "识别错误"
+                connectionStatus.value = msg
+                // 错误时自动重试（除非已停止录音）
+                if (isRecording.value) {
+                    startListening(recognizer)
+                }
+            }
+            override fun onEvent(eventType: Int, arg1: Int, arg2: Int, obj: Bundle?) {}
+        })
+        if (ret != ErrorCode.SUCCESS) {
+            connectionStatus.value = "启动识别失败: $ret"
         }
-        speechRecognizer.startListening(intent)
-    }
-
-    private fun restartRecognition() {
-        if (!isRecording.value) return
-        speechRecognizer.stopListening()
-        startListening()
     }
 
     private fun stopRealtimeRecognition() {
         isRecording.value = false
         isRecognizing.value = false
-        if (::speechRecognizer.isInitialized) {
-            speechRecognizer.stopListening()
-        }
+        xfyunRecognizer?.stopListening()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         stopRealtimeRecognition()
-        if (::speechRecognizer.isInitialized) {
-            speechRecognizer.destroy()
-        }
+        xfyunRecognizer?.destroy()
         wsManager.disconnect()
     }
 
@@ -298,24 +269,24 @@ fun MainScreen(
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Text(
-                        text = "💡 ${it.advice}",
+                        text = "识别到 ${it.advice}",
                         fontWeight = FontWeight.Bold,
                         fontSize = 17.sp,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     if (it.opponentMind.isNotBlank()) {
-                        Text("🧠 对方心理: ${it.opponentMind}", fontSize = 13.sp)
+                        Text("对方心理: ${it.opponentMind}", fontSize = 13.sp)
                     }
                     if (it.keySignal.isNotBlank()) {
-                        Text("🔑 关键信号: ${it.keySignal}", fontSize = 13.sp)
+                        Text("关键信号: ${it.keySignal}", fontSize = 13.sp)
                     }
                     if (it.risk.isNotBlank()) {
-                        Text("⚠️ 风险: ${it.risk}", fontSize = 13.sp, color = Color(0xFFE65100))
+                        Text("风险: ${it.risk}", fontSize = 13.sp, color = Color(0xFFE65100))
                     }
                     if (it.pricePosition.isNotBlank()) {
                         Text(
-                            "📊 价格态势: ${it.pricePosition}",
+                            "价格态势: ${it.pricePosition}",
                             fontSize = 14.sp,
                             color = MaterialTheme.colorScheme.primary,
                             fontWeight = FontWeight.Bold
@@ -364,7 +335,7 @@ fun MainScreen(
             )
         ) {
             Text(
-                text = if (isRecording) "⏹️ 停止实时分析" else "🎤 开始实时分析",
+                text = if (isRecording) "停止实时分析" else "开始实时分析",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold
             )

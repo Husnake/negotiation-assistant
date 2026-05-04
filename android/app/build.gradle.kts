@@ -57,4 +57,7 @@ dependencies {
 
     // Material Icons
     implementation("androidx.compose.material:material-icons-extended")
+
+    // 讯飞语音 SDK
+    implementation(files("libs/Msc.jar"))
 }
