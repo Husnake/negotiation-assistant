@@ -57,4 +57,7 @@ dependencies {
 
     // Material Icons
     implementation("androidx.compose.material:material-icons-extended")
+
+    // iFlytek Speech SDK (local jar)
+    implementation(files("libs/Msc.jar"))
 }
