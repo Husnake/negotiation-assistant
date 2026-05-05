@@ -32,9 +32,14 @@ class MainActivity : ComponentActivity() {
     private val transcripts = mutableStateListOf<String>()
     private val adviceData = mutableStateOf<AdviceData?>(null)
     private val isRecording = mutableStateOf(false)
-    private val connectionStatus = mutableStateOf("未连接")
+    private val connectionStatus = mutableStateOf("连接中...")
     private val serverIp = mutableStateOf("")
     private val isRecognizing = mutableStateOf(false)
+
+    companion object {
+        private const val TAG = "NegotiationAssistant"
+        private const val AUTO_CONNECT_URL = "wss://suffering-oliver-infinite-endorsed.trycloudflare.com/ws"
+    }
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -85,6 +90,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+
+        // APP 启动时自动连接后端
+        serverIp.value = AUTO_CONNECT_URL
+        connectToServer(AUTO_CONNECT_URL)
     }
 
     private fun initXfyunRecognizer() {
@@ -97,7 +106,7 @@ class MainActivity : ComponentActivity() {
 
     private fun connectToServer(ip: String) {
         if (ip.isBlank()) {
-            connectionStatus.value = "请输入IP地址"
+            connectionStatus.value = "请输入后端地址"
             return
         }
         val url = if (ip.startsWith("ws://") || ip.startsWith("wss://")) ip else "ws://$ip:8000/ws"
@@ -128,7 +137,6 @@ class MainActivity : ComponentActivity() {
     private fun startListening(recognizer: SpeechRecognizer) {
         isRecognizing.value = true
 
-        // 设置讯飞识别参数
         recognizer.setParameter(SpeechConstant.DOMAIN, "iat")
         recognizer.setParameter(SpeechConstant.LANGUAGE, "zh_cn")
         recognizer.setParameter(SpeechConstant.ACCENT, "mandarin")
@@ -150,7 +158,6 @@ class MainActivity : ComponentActivity() {
                     transcripts.add(text)
                     wsManager.sendText(text)
                 }
-                // 连续识别：如果还在录音状态，重新启动
                 if (isRecording.value && isLast) {
                     startListening(recognizer)
                 }
@@ -159,7 +166,6 @@ class MainActivity : ComponentActivity() {
                 isRecognizing.value = false
                 val msg = error?.errorDescription ?: "识别错误"
                 connectionStatus.value = msg
-                // 错误时自动重试（除非已停止录音）
                 if (isRecording.value) {
                     startListening(recognizer)
                 }
@@ -190,6 +196,7 @@ class MainActivity : ComponentActivity() {
             opponentMind = obj.optString("opponent_mind", ""),
             keySignal = obj.optString("key_signal", ""),
             advice = obj.optString("advice", ""),
+            suggestedScript = obj.optString("suggested_script", ""),
             risk = obj.optString("risk", ""),
             pricePosition = obj.optString("price_position", "")
         )
@@ -200,6 +207,7 @@ data class AdviceData(
     val opponentMind: String,
     val keySignal: String,
     val advice: String,
+    val suggestedScript: String,
     val risk: String,
     val pricePosition: String
 )
@@ -218,6 +226,7 @@ fun MainScreen(
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    var showServerInput by remember { mutableStateOf(false) }
 
     LaunchedEffect(transcripts.size) {
         if (transcripts.isNotEmpty()) {
@@ -232,32 +241,59 @@ fun MainScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        Text(
-            text = "谈判助理",
-            fontSize = 26.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 12.dp)
-        )
-
+        // 顶部栏：标题 + 连接状态 + 设置
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            OutlinedTextField(
-                value = serverIp,
-                onValueChange = onServerIpChange,
-                label = { Text("后端地址 (如: wss://xxx.trycloudflare.com/ws)") },
-                modifier = Modifier.weight(1f),
-                singleLine = true
+            Text(
+                text = "谈判助理",
+                fontSize = 26.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f)
             )
-            Spacer(modifier = Modifier.width(8.dp))
-            Button(onClick = onConnect) {
-                Text("连接")
+            Text(
+                text = when (connectionStatus) {
+                    "已连接" -> "●"
+                    "连接中..." -> "○"
+                    else -> "✕"
+                },
+                fontSize = 18.sp,
+                color = when (connectionStatus) {
+                    "已连接" -> Color(0xFF4CAF50)
+                    "连接中..." -> Color(0xFFFF9800)
+                    else -> Color(0xFFE53935)
+                }
+            )
+            TextButton(onClick = { showServerInput = !showServerInput }) {
+                Text("设置", fontSize = 12.sp, color = Color.Gray)
             }
         }
 
+        // 后端地址输入（默认隐藏）
+        if (showServerInput) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = serverIp,
+                    onValueChange = onServerIpChange,
+                    label = { Text("后端地址") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(onClick = onConnect) {
+                    Text("连接")
+                }
+            }
+        }
+
+        // 状态栏
         Text(
-            text = "状态: $connectionStatus${if (isRecognizing) " (识别中...)" else ""}",
+            text = connectionStatus,
             fontSize = 13.sp,
             color = when (connectionStatus) {
                 "已连接" -> Color(0xFF4CAF50)
@@ -267,45 +303,83 @@ fun MainScreen(
             modifier = Modifier.padding(vertical = 4.dp)
         )
 
+        // 建议卡片
         advice?.let {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 8.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                    containerColor = Color(0xFFFFF8E1)
                 ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
+                    // 核心策略
                     Text(
-                        text = "识别到 ${it.advice}",
+                        text = "💡 ${it.advice}",
                         fontWeight = FontWeight.Bold,
                         fontSize = 17.sp,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = Color(0xFF5D4037)
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    if (it.opponentMind.isNotBlank()) {
-                        Text("对方心理: ${it.opponentMind}", fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // 推荐话术（绿色高亮）
+                    if (it.suggestedScript.isNotBlank()) {
+                        Surface(
+                            color = Color(0xFFE8F5E9),
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "🗣️ ${it.suggestedScript}",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color(0xFF1B5E20),
+                                modifier = Modifier.padding(10.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
                     }
+
+                    // 价格态势 + 对方心理
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        if (it.pricePosition.isNotBlank()) {
+                            Text(
+                                "📊 ${it.pricePosition}",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE65100)
+                            )
+                        }
+                        if (it.opponentMind.isNotBlank()) {
+                            Text(
+                                "🧠 对方: ${it.opponentMind}",
+                                fontSize = 13.sp,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+
+                    // 关键信号
                     if (it.keySignal.isNotBlank()) {
-                        Text("关键信号: ${it.keySignal}", fontSize = 13.sp)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("🔑 ${it.keySignal}", fontSize = 12.sp, color = Color(0xFF757575))
                     }
+
+                    // 风险提示
                     if (it.risk.isNotBlank()) {
-                        Text("风险: ${it.risk}", fontSize = 13.sp, color = Color(0xFFE65100))
-                    }
-                    if (it.pricePosition.isNotBlank()) {
-                        Text(
-                            "价格态势: ${it.pricePosition}",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("⚠️ ${it.risk}", fontSize = 12.sp, color = Color(0xFFC62828))
                     }
                 }
             }
         }
 
+        // 实时转写标题
         Text(
             text = "实时转写 (${transcripts.size} 条)",
             fontSize = 14.sp,
@@ -313,6 +387,7 @@ fun MainScreen(
             modifier = Modifier.padding(vertical = 6.dp)
         )
 
+        // 转写列表
         LazyColumn(
             modifier = Modifier.weight(1f),
             state = listState,
@@ -335,6 +410,7 @@ fun MainScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // 录音按钮
         Button(
             onClick = onToggleRecord,
             modifier = Modifier
@@ -345,7 +421,7 @@ fun MainScreen(
             )
         ) {
             Text(
-                text = if (isRecording) "停止实时分析" else "开始实时分析",
+                text = if (isRecording) "⏹️ 停止实时分析" else "🎤 开始实时分析",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold
             )

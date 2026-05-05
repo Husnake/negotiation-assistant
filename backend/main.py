@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from datetime import datetime
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,14 +18,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# LLM 客户端（兼容 OpenAI 格式，支持 DeepSeek / 火山引擎 / OpenAI 等）
+# LLM 客户端
 client = openai.AsyncOpenAI(
     api_key=os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY"),
     base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
 )
 
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
-LLM_SUMMARY_MODEL = os.getenv("LLM_SUMMARY_MODEL", "gpt-4o-mini")
+LLM_SUMMARY_MODEL = os.getenv("LLM_SUMMARY_MODEL", LLM_MODEL)
 
 
 class NegotiationSession:
@@ -44,6 +45,13 @@ TRIGGER_WORDS = [
 ]
 
 
+def clean_response(text: str) -> str:
+    """清理 MiniMax 等模型的 thinking tag 污染"""
+    text = re.sub(r'<sum>.*?</sum>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    return text.strip()
+
+
 async def analyze_dialogue(session: NegotiationSession):
     """调用 LLM 分析谈判对话"""
     recent = "\n".join([
@@ -57,11 +65,12 @@ async def analyze_dialogue(session: NegotiationSession):
 最近对话记录：
 {recent}
 
-请严格输出JSON格式，不要markdown：
+请严格输出JSON格式，不要markdown，不要think标签：
 {{
-    "opponent_mind": "对方当前心理状态（15字以内）",
+    "opponent_mind": "对方当前心理状态（10字以内）",
     "key_signal": "发现的关键信号",
-    "advice": "具体建议（50字以内，直接说怎么做）",
+    "advice": "核心策略（30字以内）",
+    "suggested_script": "给对方的一句原话（50字以内，直接可用）",
     "risk": "风险提示",
     "price_position": "价格态势：僵持/让步/逼单/犹豫/松口"
 }}"""
@@ -72,11 +81,10 @@ async def analyze_dialogue(session: NegotiationSession):
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.6,
-            max_tokens=400
+            max_tokens=500
         )
-        result = response.choices[0].message.content
+        result = clean_response(response.choices[0].message.content)
 
-        # 更新上下文摘要（每5次分析更新一次）
         session.analysis_count += 1
         if session.analysis_count % 5 == 0:
             await update_summary(session)
@@ -97,7 +105,7 @@ async def update_summary(session: NegotiationSession):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=100
         )
-        session.context_summary = resp.choices[0].message.content.strip()
+        session.context_summary = clean_response(resp.choices[0].message.content)
     except:
         pass
 
@@ -113,7 +121,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            # 接收 JSON 文本消息（App 实时语音识别后发送的文字）
             data = await websocket.receive_json()
             text = data.get("text", "").strip()
 
@@ -123,7 +130,6 @@ async def websocket_endpoint(websocket: WebSocket):
             print(f"[收到] {text}")
             session.transcript.append(text)
 
-            # 发送转写结果给客户端
             await websocket.send_json({
                 "type": "transcript",
                 "text": text,
